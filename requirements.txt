@@ -1,0 +1,7 @@
+pyTelegramBotAPI==4.14.0
+requests
+gTTS
+qrcode
+pillow
+beautifulsoup4
+yt-dlp
