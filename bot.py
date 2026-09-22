@@ -1,8 +1,8 @@
-import os, time, json, sqlite3, requests, telebot, glob, random
+import os, time, json, sqlite3, requests, telebot, glob, random, threading
 from telebot import types
 from gtts import gTTS
 from PIL import Image, ImageDraw, ImageFont
-from datetime import date
+from datetime import date, datetime, timedelta
 
 TOKEN = os.getenv("BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_KEY")
@@ -17,6 +17,9 @@ INVITES_PATH = os.path.join(DATA_DIR, "invites.json")
 PROFILES_PATH = os.path.join(DATA_DIR, "full_profiles.json")
 GIFT_PATH = os.path.join(DATA_DIR, "gift_codes.json")
 INVITE_USED_PATH = os.path.join(DATA_DIR, "invite_used.json")
+WHEEL_PATH = os.path.join(DATA_DIR, "wheel.json")
+VIP_PATH = os.path.join(DATA_DIR, "vip.json")
+LASTSEEN_PATH = os.path.join(DATA_DIR, "lastseen.json")
 
 bot = telebot.TeleBot(TOKEN)
 try: requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook", timeout=10)
@@ -51,11 +54,34 @@ if os.path.exists(INVITE_USED_PATH):
     except: invite_used={}
 def save_invite_used(): open(INVITE_USED_PATH,"w").write(json.dumps(invite_used))
 
+# NEW V8.4.0
+wheel_db={}
+if os.path.exists(WHEEL_PATH):
+    try: wheel_db=json.loads(open(WHEEL_PATH,"r").read())
+    except: wheel_db={}
+def save_wheel(): open(WHEEL_PATH,"w").write(json.dumps(wheel_db))
+vip_db={}
+if os.path.exists(VIP_PATH):
+    try: vip_db=json.loads(open(VIP_PATH,"r").read())
+    except: vip_db={}
+def save_vip(): open(VIP_PATH,"w").write(json.dumps(vip_db))
+def is_vip(uid):
+    if str(uid) in vip_db and time.time() < vip_db[str(uid)]: return True
+    return False
+def vip_left(uid):
+    if str(uid) in vip_db:
+        left=int(vip_db[str(uid)]-time.time())
+        if left>0: return f"{left//86400} روز و {(left%86400)//3600} ساعت"
+    return "0"
+
+lastseen={}
+if os.path.exists(LASTSEEN_PATH):
+    try: lastseen=json.loads(open(LASTSEEN_PATH,"r").read())
+    except: lastseen={}
+def save_lastseen(): open(LASTSEEN_PATH,"w").write(json.dumps(lastseen))
+
 reports_db={}; banned_until={}; spam_warnings={}; gift_tries={}
-waiting=[] # الان لیست دیکشنری هست: {"uid":..., "want":...}
-chats={}
-pending_coin_target={}
-pending_rating={} # uid -> partner_id برای امتیاز دهی
+waiting=[]; chats={}; pending_coin_target={}; pending_rating={}
 
 def is_link_spam(text):
     t=text.lower()
@@ -181,7 +207,7 @@ def video_to_gif(in_path):
     return None
 def main_menu(uid):
     m=types.InlineKeyboardMarkup(row_width=2)
-    m.add(types.InlineKeyboardButton("🎨 عکس", callback_data="mode_image"),types.InlineKeyboardButton("📥 دانلود", callback_data="mode_download"),types.InlineKeyboardButton("💬 چت ناشناس", callback_data="chat"),types.InlineKeyboardButton("🎨 کارت ساز", callback_data="mode_card"),types.InlineKeyboardButton("👑 پروفایل گیمینگ", callback_data="mode_profile"),types.InlineKeyboardButton("🎞️ گیف ساز", callback_data="mode_gif"),types.InlineKeyboardButton("👤 پروفایل من", callback_data="full_profile"),types.InlineKeyboardButton("🎁 کد هدیه", callback_data="gift_redeem"),types.InlineKeyboardButton("🎙️ ویس", callback_data="mode_voice"),types.InlineKeyboardButton("🌤️ هوا", callback_data="mode_weather"),types.InlineKeyboardButton("💰 سکه‌هام", callback_data="mycoins"),types.InlineKeyboardButton("🎁 روزانه", callback_data="daily"),types.InlineKeyboardButton("🏆 لیدربورد", callback_data="top"),types.InlineKeyboardButton("⚙️ همه امکانات", callback_data="more"),)
+    m.add(types.InlineKeyboardButton("🎨 عکس", callback_data="mode_image"),types.InlineKeyboardButton("📥 دانلود", callback_data="mode_download"),types.InlineKeyboardButton("💬 چت ناشناس", callback_data="chat"),types.InlineKeyboardButton("🎨 کارت ساز", callback_data="mode_card"),types.InlineKeyboardButton("👑 پروفایل گیمینگ", callback_data="mode_profile"),types.InlineKeyboardButton("🎞️ گیف ساز", callback_data="mode_gif"),types.InlineKeyboardButton("👤 پروفایل من", callback_data="full_profile"),types.InlineKeyboardButton("🎁 کد هدیه", callback_data="gift_redeem"),types.InlineKeyboardButton("🎡 گردونه", callback_data="wheel"),types.InlineKeyboardButton("💎 VIP", callback_data="vip_info"),types.InlineKeyboardButton("🎙️ ویس", callback_data="mode_voice"),types.InlineKeyboardButton("🌤️ هوا", callback_data="mode_weather"),types.InlineKeyboardButton("💰 سکه‌هام", callback_data="mycoins"),types.InlineKeyboardButton("🎁 روزانه", callback_data="daily"),types.InlineKeyboardButton("🏆 لیدربورد", callback_data="top"),types.InlineKeyboardButton("⚙️ همه امکانات", callback_data="more"),)
     if is_admin(uid): m.add(types.InlineKeyboardButton("👑 پنل مدیریت", callback_data="admin_panel"))
     return m
 def more_menu():
@@ -222,6 +248,7 @@ def province_keyboard():
 @bot.message_handler(commands=['start'])
 def start_h(msg):
     uid=msg.chat.id
+    lastseen[str(uid)]=time.time(); save_lastseen()
     if is_banned(uid):
         bot.send_message(uid,f"🚫 تو بن هستی!\n⏳ زمان باقی‌مانده: {get_ban_time_left(uid)}\nبعدا برگرد.")
         return
@@ -236,36 +263,44 @@ def start_h(msg):
             except: pass
     set_user(uid,mode="chat")
     coins=get_coins(uid)
-    bot.send_message(uid,f"سلام {msg.from_user.first_name} عزیز 👋✨\n\nبه کامو خوش اومدی!\n💰 سکه‌هات: {coins}\n👇 از منو یه گزینه انتخاب کن:",reply_markup=main_menu(uid))
+    vip_tag="💎 VIP" if is_vip(uid) else ""
+    bot.send_message(uid,f"سلام {msg.from_user.first_name} عزیز 👋✨ {vip_tag}\n\nبه کامو خوش اومدی!\n💰 سکه‌هات: {coins}\n👇 از منو یه گزینه انتخاب کن:",reply_markup=main_menu(uid))
 
 def find_match(my_uid, my_want):
     my_profile=get_full(my_uid)
     my_gender=my_profile.get("gender","❓")
-    for i, w in enumerate(waiting):
+    # VIP ها اول
+    vip_waiting=[w for w in waiting if is_vip(w["uid"])]
+    normal_waiting=[w for w in waiting if not is_vip(w["uid"])]
+    ordered = vip_waiting + normal_waiting if is_vip(my_uid) else waiting
+    # اگه خودت VIP باشی، اول VIP ها رو چک کن
+    search_list = ordered if is_vip(my_uid) else waiting
+    for i, w in enumerate(search_list):
+        # برای لیست اصلی index پیدا کن
+        real_index = waiting.index(w) if w in waiting else -1
+        if real_index==-1: continue
         other_uid=w["uid"]
         other_want=w["want"]
         if other_uid==my_uid: continue
         other_profile=get_full(other_uid)
         other_gender=other_profile.get("gender","❓")
-        # فیلتر من راضی باشم؟
         ok1 = True
         if my_want=="boy" and "پسر" not in other_gender: ok1=False
         if my_want=="girl" and "دختر" not in other_gender: ok1=False
-        # فیلتر طرف راضی باشه؟
         ok2 = True
         if other_want=="boy" and "پسر" not in my_gender: ok2=False
         if other_want=="girl" and "دختر" not in my_gender: ok2=False
         if ok1 and ok2:
-            return waiting.pop(i)
+            return waiting.pop(real_index)
     return None
 
 @bot.callback_query_handler(func=lambda c: True)
 def cb(c):
     uid=c.message.chat.id; data=c.data
+    lastseen[str(uid)]=time.time(); save_lastseen()
     if is_banned(uid) and not is_admin(uid):
         bot.answer_callback_query(c.id, f"🚫 تو بن هستی! {get_ban_time_left(uid)} باقی مونده", show_alert=True)
         return
-    # امتیاز دهی
     if data.startswith("rate_"):
         partner = pending_rating.get(str(uid))
         if data=="rate_skip":
@@ -285,7 +320,27 @@ def cb(c):
             except: pass
         if str(uid) in pending_rating: del pending_rating[str(uid)]
         bot.answer_callback_query(c.id); return
-
+    if data=="wheel":
+        today=str(date.today())
+        if wheel_db.get(str(uid))==today:
+            bot.answer_callback_query(c.id,"🎡 امروز چرخوندی! فردا بیا",show_alert=True); return
+        reward=random.choice([1,1,2,2,3,3,5,5,7,10,15])
+        add_coins(uid,reward); wheel_db[str(uid)]=today; save_wheel()
+        bot.send_message(uid,f"🎡 گردونه چرخید!\n\n🎉 {reward} سکه برنده شدی!\n💰 سکه‌هات: {get_coins(uid)}",reply_markup=main_menu(uid))
+        bot.answer_callback_query(c.id); return
+    if data=="vip_info":
+        if is_vip(uid):
+            bot.send_message(uid,f"💎 تو VIP هستی!\n⏳ باقی‌مانده: {vip_left(uid)}\n\nمزایا:\n✅ پروفایل طلایی\n✅ اولویت تو چت ناشناس\n✅ 2 برابر شانس گردونه",reply_markup=main_menu(uid))
+        else:
+            m=types.InlineKeyboardMarkup(); m.add(types.InlineKeyboardButton("💎 خرید VIP - 30 سکه / 7 روز",callback_data="buy_vip"))
+            bot.send_message(uid,"💎 **پروفایل VIP**\n\nبا 30 سکه 7 روز VIP شو:\n🌟 پروفایل طلایی\n⚡ اولویت تو چت ناشناس\n🎡 شانس بیشتر تو گردونه\n\nمیخری؟",reply_markup=m)
+        return
+    if data=="buy_vip":
+        if get_coins(uid)<30:
+            bot.send_message(uid,f"💸 سکه‌ت کمه! 30 سکه لازمه، تو {get_coins(uid)} داری\nلینک دعوتت:\nhttps://t.me/{bot.get_me().username}?start={uid}"); return
+        add_coins(uid,-30); vip_db[str(uid)]=time.time()+7*86400; save_vip()
+        bot.send_message(uid,f"✅ تبریک! 7 روز VIP شدی 💎\n💰 سکه‌هات: {get_coins(uid)}",reply_markup=main_menu(uid))
+        return
     if data=="report_user":
         if uid not in chats: bot.answer_callback_query(c.id,"تو تو چت نیستی"); return
         partner=chats[uid]
@@ -295,7 +350,6 @@ def cb(c):
             try: bot.send_message(partner,f"🚫 به خاطر گزارش کاربران 10 دقیقه بن شدی\n⏳ زمان: 10 دقیقه")
             except: pass
         bot.send_message(uid,"✅ گزارش ثبت شد. چت بسته شد.",reply_markup=main_menu(uid))
-        # امتیاز بعد گزارش هم بپرس
         pending_rating[str(uid)]=partner
         bot.send_message(uid,"به این چت چه امتیازی میدی؟",reply_markup=rating_keyboard())
         if uid in chats:
@@ -311,7 +365,6 @@ def cb(c):
             if partner in chats: del chats[partner]
             try: bot.send_message(partner,"❌ طرف چت رو بست\n/chat برای چت جدید",reply_markup=main_menu(partner))
             except: pass
-            # برای هر دو طرف امتیاز بخواه
             if partner:
                 pending_rating[str(uid)]=partner
                 pending_rating[str(partner)]=uid
@@ -320,7 +373,6 @@ def cb(c):
                 except: pass
         else:
             bot.send_message(uid,"چت بسته شد ❌",reply_markup=main_menu(uid))
-        # از صف هم پاک کن
         global waiting
         waiting=[w for w in waiting if w["uid"]!=uid]
         bot.answer_callback_query(c.id); return
@@ -328,14 +380,16 @@ def cb(c):
         if uid not in chats: bot.answer_callback_query(c.id,"تو تو چت نیستی"); return
         partner=chats[uid]
         pf=get_full(partner)
-        txt=f"👤 پروفایل طرف مقابل:\n\n📝 اسم: {pf['name']}\n💍 وضعیت: {pf.get('relationship','❓')}\n👦👧 جنسیت: {pf['gender']}\n🎂 سن: {pf['age']}\n🗺️ استان: {pf['province']}\n🏙️ شهر: {pf['city']}\n📝 بیو: {pf['bio']}\n⭐ امتیاز: {pf['score']}"
+        vip_tag="💎 VIP\n" if is_vip(partner) else ""
+        txt=f"{vip_tag}👤 پروفایل طرف مقابل:\n\n📝 اسم: {pf['name']}\n💍 وضعیت: {pf.get('relationship','❓')}\n👦👧 جنسیت: {pf['gender']}\n🎂 سن: {pf['age']}\n🗺️ استان: {pf['province']}\n🏙️ شهر: {pf['city']}\n📝 بیو: {pf['bio']}\n⭐ امتیاز: {pf['score']}"
         if pf['photo']:
             try: bot.send_photo(uid,pf['photo'],caption=txt); bot.answer_callback_query(c.id); return
             except: pass
         bot.send_message(uid,txt); bot.answer_callback_query(c.id); return
     if data=="full_profile":
         pf=get_full(uid)
-        txt=f"👤 **پروفایل تو:**\n\n📝 اسم: {pf['name']}\n💍 وضعیت: {pf.get('relationship','❓')}\n👦👧 جنسیت: {pf['gender']}\n🎂 سن: {pf['age']}\n🗺️ استان: {pf['province']}\n🏙️ شهر: {pf['city']}\n📝 بیو: {pf['bio']}\n⭐ امتیاز: {pf['score']}\n💰 سکه: {get_coins(uid)}\n\nبرای ویرایش هر کدوم بزن:"
+        vip_tag="💎 VIP - " + vip_left(uid) + " باقی\n" if is_vip(uid) else ""
+        txt=f"{vip_tag}👤 **پروفایل تو:**\n\n📝 اسم: {pf['name']}\n💍 وضعیت: {pf.get('relationship','❓')}\n👦👧 جنسیت: {pf['gender']}\n🎂 سن: {pf['age']}\n🗺️ استان: {pf['province']}\n🏙️ شهر: {pf['city']}\n📝 بیو: {pf['bio']}\n⭐ امتیاز: {pf['score']}\n💰 سکه: {get_coins(uid)}\n\nبرای ویرایش هر کدوم بزن:"
         if pf['photo']:
             try: bot.send_photo(uid,pf['photo'],caption=txt,reply_markup=full_profile_keyboard()); return
             except: pass
@@ -371,7 +425,7 @@ def cb(c):
         if not is_admin(uid): return
         total_users=len(coins_db); total_profiles=len(full_profiles); total_chats=len(chats); total_wait=len(waiting)
         total_coins=sum(coins_db.values()) if coins_db else 0
-        txt=f"📊 **آمار ربات:**\n\n👥 کل کاربران: {total_users}\n👤 پروفایل کامل: {total_profiles}\n💬 چت فعال: {total_chats}\n⏳ تو صف: {total_wait}\n💰 مجموع سکه‌ها: {total_coins}\n🎁 کد هدیه فعال: {len(gift_db)}\n🚫 بن شده: {len(banned_until)}\n📂 دیتابیس: {DATA_DIR}"
+        txt=f"📊 **آمار ربات:**\n\n👥 کل کاربران: {total_users}\n👤 پروفایل کامل: {total_profiles}\n💬 چت فعال: {total_chats}\n⏳ تو صف: {total_wait}\n💰 مجموع سکه‌ها: {total_coins}\n🎁 کد هدیه فعال: {len(gift_db)}\n🚫 بن شده: {len(banned_until)}\n💎 VIP: {len([k for k in vip_db if is_vip(k)])}\n📂 دیتابیس: {DATA_DIR}"
         bot.send_message(uid,txt,reply_markup=admin_keyboard()); return
     if data=="admin_broadcast":
         if not is_admin(uid): return
@@ -402,25 +456,23 @@ def cb(c):
     if data=="gift_redeem":
         gift_tries[str(uid)]=0
         set_user(uid,mode="gift_redeem"); bot.send_message(uid,"🎁 کد هدیه رو بفرست:"); return
-
-    # چت ناشناس با فیلتر
     if data=="chat":
         if is_banned(uid): bot.send_message(uid,f"🚫 تو بن هستی!\n⏳ {get_ban_time_left(uid)} باقی مونده"); return
         if uid in chats: bot.send_message(uid,"تو الان تو چاتی! /end بزن",reply_markup=anon_keyboard()); return
         if any(w["uid"]==uid for w in waiting): bot.send_message(uid,"توی صفی... /end برای لغو"); return
         bot.send_message(uid,"👇 دوست داری با کی وصل شی؟",reply_markup=chat_filter_keyboard()); return
-
     if data.startswith("filter_"):
-        want=data.replace("filter_","") # boy, girl, any
+        want=data.replace("filter_","")
         if is_banned(uid): bot.send_message(uid,f"🚫 تو بن هستی!"); return
-        # سعی کن مچ پیدا کنی
         match=find_match(uid,want)
         if match:
             p=match["uid"]
             chats[uid]=p; chats[p]=uid
+            set_user(uid,mode="chat"); set_user(p,mode="chat")
             pf1=get_full(uid); pf2=get_full(p)
-            info_p=f"👤 طرف: {pf2['name']} | {pf2.get('relationship','❓')} | {pf2['gender']} | {pf2['age']} | {pf2['province']}-{pf2['city']}"
-            info_u=f"👤 طرف: {pf1['name']} | {pf1.get('relationship','❓')} | {pf1['gender']} | {pf1['age']} | {pf1['province']}-{pf1['city']}"
+            vip1="💎" if is_vip(uid) else ""; vip2="💎" if is_vip(p) else ""
+            info_p=f"👤 طرف: {pf2['name']} {vip2} | {pf2.get('relationship','❓')} | {pf2['gender']} | {pf2['age']} | {pf2['province']}-{pf2['city']}"
+            info_u=f"👤 طرف: {pf1['name']} {vip1} | {pf1.get('relationship','❓')} | {pf1['gender']} | {pf1['age']} | {pf1['province']}-{pf1['city']}"
             bot.send_message(uid,f"✅ وصل شدی به یه ناشناس!\n{info_p}\n\nهر چی بفرستی میره\n🚨 لینک = بن",reply_markup=anon_keyboard())
             bot.send_message(p,f"✅ یه نفر وصل شد بهت!\n{info_u}\n\n🚨 لینک = بن",reply_markup=anon_keyboard())
         else:
@@ -428,7 +480,6 @@ def cb(c):
             set_user(uid,mode="chat_waiting_ai")
             bot.send_message(uid,f"🔍 دنبال { 'پسر' if want=='boy' else 'دختر' if want=='girl' else 'یه نفر'} میگردم...\n\n💡 تا پیدا بشه من کامو هستم، باهام حرف بزن! هر چی بگی جواب میدم 🤖\n/end برای لغو")
         return
-
     if data=="more": bot.send_message(uid,"⚙️ همه امکانات کامو:",reply_markup=more_menu())
     elif data=="back": bot.send_message(uid,"منو اصلی:",reply_markup=main_menu(uid))
     elif data=="mycoins": bot.answer_callback_query(c.id, f"💰 سکه‌هات: {get_coins(uid)}", show_alert=True); return
@@ -453,7 +504,7 @@ def cb(c):
         bot.send_message(uid,"چه شخصیتی دوست داری؟",reply_markup=m)
     elif data.startswith("pers_"): set_user(uid,pers=data.replace("pers_","")); bot.send_message(uid,f"شخصیت شد {data.replace('pers_','')} ✅",reply_markup=main_menu(uid))
     elif data=="fal": bot.send_chat_action(uid,'typing'); txt=ask_groq(uid,"فال حافظ واقعی بده: غزل + معنی کوتاه","تو حافظ هستی"); bot.send_message(uid,txt)
-    elif data=="joke": bot.send_chat_action(uid,"جوک فارسی جدید خنده دار کوتاه","جوک گو"); bot.send_message(uid,txt)
+    elif data=="joke": bot.send_chat_action(uid,'typing'); txt=ask_groq(uid,"جوک فارسی جدید خنده دار کوتاه","جوک گو"); bot.send_message(uid,txt)
     elif data=="price":
         try:
             r=requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",timeout=10).json()
@@ -466,13 +517,26 @@ def cb(c):
     try: bot.answer_callback_query(c.id)
     except: pass
 
-@bot.message_handler(commands=['end','next','chat','menu','coins','daily','top','report','profile','admin','gift'])
+@bot.message_handler(commands=['end','next','chat','menu','coins','daily','top','report','profile','admin','gift','spin','vip'])
 def cmds(msg):
     uid=msg.chat.id
+    lastseen[str(uid)]=time.time(); save_lastseen()
     if is_banned(uid) and not is_admin(uid):
         bot.send_message(uid,f"🚫 تو بن هستی!\n⏳ زمان باقی‌مانده: {get_ban_time_left(uid)}")
         return
     t=msg.text.lower(); parts=msg.text.split()
+    if "spin" in t or "گردونه" in t:
+        today=str(date.today())
+        if wheel_db.get(str(uid))==today: bot.send_message(uid,"🎡 امروز چرخوندی! فردا بیا"); return
+        reward=random.choice([1,1,2,2,2,3,3,5,5,7,10,15])
+        if is_vip(uid): reward*=2
+        add_coins(uid,reward); wheel_db[str(uid)]=today; save_wheel()
+        bot.send_message(uid,f"🎡 گردونه چرخید!\n\n🎉 {reward} سکه برنده شدی! {'💎 VIP 2x' if is_vip(uid) else ''}\n💰 سکه‌هات: {get_coins(uid)}",reply_markup=main_menu(uid)); return
+    if "vip" in t:
+        if is_vip(uid): bot.send_message(uid,f"💎 VIP هستی! باقی: {vip_left(uid)}"); return
+        else:
+            m=types.InlineKeyboardMarkup(); m.add(types.InlineKeyboardButton("💎 خرید VIP - 30 سکه",callback_data="buy_vip"))
+            bot.send_message(uid,"💎 VIP 30 سکه / 7 روز",reply_markup=m); return
     if "admin" in t:
         if not is_admin(uid): bot.send_message(uid,"⛔ تو ادمین نیستی"); return
         bot.send_message(uid,"👑 پنل مدیریت:",reply_markup=admin_keyboard()); return
@@ -492,7 +556,8 @@ def cmds(msg):
     if "coins" in t: bot.send_message(uid,f"💰 سکه‌هات: {get_coins(uid)}"); return
     if "profile" in t:
         pf=get_full(uid)
-        txt=f"👤 پروفایل:\n📝 اسم: {pf['name']}\n💍 وضعیت: {pf.get('relationship','❓')}\nجنسیت: {pf['gender']}\nسن: {pf['age']}\nاستان: {pf['province']}\nشهر: {pf['city']}\nبیو: {pf['bio']}\n⭐ امتیاز: {pf['score']}"
+        vip_tag="💎 VIP\n" if is_vip(uid) else ""
+        txt=f"{vip_tag}👤 پروفایل:\n📝 اسم: {pf['name']}\n💍 وضعیت: {pf.get('relationship','❓')}\nجنسیت: {pf['gender']}\nسن: {pf['age']}\nاستان: {pf['province']}\nشهر: {pf['city']}\nبیو: {pf['bio']}\n⭐ امتیاز: {pf['score']}"
         if pf['photo']:
             try: bot.send_photo(uid,pf['photo'],caption=txt,reply_markup=full_profile_keyboard()); return
             except: pass
@@ -546,6 +611,7 @@ def cmds(msg):
 @bot.message_handler(content_types=['voice'])
 def voice_h(msg):
     uid=msg.chat.id
+    lastseen[str(uid)]=time.time(); save_lastseen()
     if is_banned(uid) and not is_admin(uid):
         bot.send_message(uid,f"🚫 تو بن هستی! ⏳ {get_ban_time_left(uid)} باقی مونده")
         return
@@ -564,6 +630,7 @@ def voice_h(msg):
 @bot.message_handler(content_types=['photo'])
 def photo_h(msg):
     uid=msg.chat.id
+    lastseen[str(uid)]=time.time(); save_lastseen()
     if is_banned(uid) and not is_admin(uid):
         bot.send_message(uid,f"🚫 تو بن هستی! ⏳ {get_ban_time_left(uid)} باقی مونده")
         return
@@ -585,6 +652,7 @@ def photo_h(msg):
 @bot.message_handler(content_types=['video','document','animation'])
 def video_h(msg):
     uid=msg.chat.id
+    lastseen[str(uid)]=time.time(); save_lastseen()
     if is_banned(uid) and not is_admin(uid):
         bot.send_message(uid,f"🚫 تو بن هستی! ⏳ {get_ban_time_left(uid)} باقی مونده")
         return
@@ -605,6 +673,7 @@ def video_h(msg):
 @bot.message_handler(func=lambda m: True)
 def all_h(m):
     uid=m.chat.id; txt=m.text.strip(); mode,_,_=get_user(uid)
+    lastseen[str(uid)]=time.time(); save_lastseen()
     if is_banned(uid) and not is_admin(uid):
         bot.send_message(uid,f"🚫 تو بن هستی!\n⏳ زمان باقی‌مانده: {get_ban_time_left(uid)}\nبعد از اتمام بن میتونی برگردی.")
         return
@@ -698,7 +767,7 @@ def all_h(m):
                 target=txt.strip(); pf=get_full(target); coins=get_coins(target); inv=get_invites(target)
                 is_b = "بله" if is_banned(target) else "خیر"
                 left = f" ({get_ban_time_left(target)} باقی)" if is_banned(target) else ""
-                txt2=f"👤 اطلاعات {target}:\n\n📝 اسم: {pf['name']}\n💍 وضعیت: {pf.get('relationship','❓')}\n💰 سکه: {coins}\n👥 دعوت: {inv}\n👦 جنسیت: {pf['gender']}\n🎂 سن: {pf['age']}\n🗺️ {pf['province']}-{pf['city']}\n📝 {pf['bio']}\n⭐ امتیاز: {pf['score']}\n🚫 بن: {is_b}{left}"
+                txt2=f"👤 اطلاعات {target}:\n\n📝 اسم: {pf['name']}\n💍 وضعیت: {pf.get('relationship','❓')}\n💰 سکه: {coins}\n👥 دعوت: {inv}\n👦 جنسیت: {pf['gender']}\n🎂 سن: {pf['age']}\n🗺️ {pf['province']}-{pf['city']}\n📝 {pf['bio']}\n⭐ امتیاز: {pf['score']}\n💎 VIP: {'بله '+vip_left(target) if is_vip(target) else 'خیر'}\n🚫 بن: {is_b}{left}"
                 bot.send_message(uid,txt2,reply_markup=admin_keyboard())
             except: bot.send_message(uid,"کاربر پیدا نشد")
             set_user(uid,mode="chat"); return
@@ -734,6 +803,10 @@ def all_h(m):
         set_user(uid,mode="chat"); return
 
     if mode=="edit_name":
+        if is_link_spam(txt):
+            banned_until[str(uid)]=time.time()+3600
+            bot.send_message(uid,f"🚫 به خاطر گذاشتن لینک تو اسم 1 ساعت بن شدی!\n⏳ زمان: 1 ساعت")
+            set_user(uid,mode="chat"); return
         if len(txt) < 2 or len(txt) > 20: bot.send_message(uid,"اسم باید بین 2 تا 20 حرف باشه:"); return
         pf=get_full(uid); pf['name']=txt[:20]; full_profiles[str(uid)]=pf; save_full()
         bot.send_message(uid,f"✅ اسم ثبت شد: {txt}",reply_markup=full_profile_keyboard()); set_user(uid,mode="chat"); return
@@ -742,26 +815,32 @@ def all_h(m):
         pf=get_full(uid); pf['age']=txt; full_profiles[str(uid)]=pf; save_full()
         bot.send_message(uid,f"✅ سن ثبت شد: {txt}",reply_markup=full_profile_keyboard()); set_user(uid,mode="chat"); return
     if mode=="edit_province":
+        if is_link_spam(txt):
+            banned_until[str(uid)]=time.time()+3600
+            bot.send_message(uid,f"🚫 به خاطر لینک 1 ساعت بن شدی!"); set_user(uid,mode="chat"); return
         pf=get_full(uid); pf['province']=txt[:20]; full_profiles[str(uid)]=pf; save_full()
         bot.send_message(uid,f"✅ استان: {txt}\nحالا شهرت؟"); set_user(uid,mode="edit_city"); return
     if mode=="edit_city":
+        if is_link_spam(txt):
+            banned_until[str(uid)]=time.time()+3600
+            bot.send_message(uid,f"🚫 به خاطر لینک 1 ساعت بن شدی!"); set_user(uid,mode="chat"); return
         pf=get_full(uid); pf['city']=txt[:20]; full_profiles[str(uid)]=pf; save_full()
         bot.send_message(uid,f"✅ شهر: {txt}",reply_markup=full_profile_keyboard()); set_user(uid,mode="chat"); return
     if mode=="edit_bio":
+        if is_link_spam(txt):
+            banned_until[str(uid)]=time.time()+3600
+            bot.send_message(uid,f"🚫 به خاطر گذاشتن لینک تو بیو 1 ساعت بن شدی!\n⏳ زمان: 1 ساعت\nلینک و آیدی گذاشتن ممنوعه!")
+            set_user(uid,mode="chat"); return
         pf=get_full(uid); pf['bio']=txt[:100]; full_profiles[str(uid)]=pf; save_full()
         bot.send_message(uid,f"✅ بیو ثبت شد",reply_markup=full_profile_keyboard()); set_user(uid,mode="chat"); return
-
-    # هوش مصنوعی وقتی تو صفه
     if mode=="chat_waiting_ai":
         if any(w["uid"]==uid for w in waiting):
-            # هنوز تو صفه، با هوش مصنوعی حرف بزن
             bot.send_chat_action(uid,'typing')
             ans=ask_groq(uid,txt,"تو کامو هستی، کاربر تو صف چت ناشناسه و حوصله‌ش سر رفته. باهاش بامزه و صمیمی فارسی حرف بزن، بگو دارم برات پارتنر پیدا میکنم. کوتاه جواب بده")
             bot.send_message(uid,f"🤖 کامو: {ans}\n\n⏳ هنوز تو صفی... /end برای لغو")
             return
         else:
             set_user(uid,mode="chat")
-
     if uid in chats:
         if txt.startswith("/"): return
         if is_link_spam(txt):
@@ -826,5 +905,22 @@ def all_h(m):
     if mode=="caption": bot.send_chat_action(uid,'typing'); bot.send_message(uid,ask_groq(uid,f"3 کپشن اینستا جذاب برای {txt} با هشتگ بساز")); set_user(uid,mode="chat"); return
     bot.send_chat_action(uid,'typing'); bot.send_message(uid,ask_groq(uid,txt))
 
-print(f"✅ KAMO V8.3.0 LIVE - FILTER+RELATIONSHIP+AI-WAIT+RATING")
+# یادآوری هوشمند هر 1 ساعت چک میکنه
+def reminder_loop():
+    while True:
+        try:
+            time.sleep(3600)
+            now=time.time()
+            for uid_str, last in list(lastseen.items()):
+                if now - last > 24*3600 and now - last < 25*3600: # بین 24 تا 25 ساعت
+                    try:
+                        bot.send_message(int(uid_str),f"👋 دلم برات تنگ شده! 😢\n\n🎡 گردونت آماده‌ست، یه نفر هم تو چت ناشناس منتظرته!\nبزن /start برگرد 💖",reply_markup=main_menu(int(uid_str)))
+                        lastseen[uid_str]=now; save_lastseen()
+                        time.sleep(1)
+                    except: pass
+        except: pass
+
+threading.Thread(target=reminder_loop, daemon=True).start()
+
+print(f"✅ KAMO V8.4.0 LIVE - WHEEL+VIP+ANTISPAM+REMINDER")
 bot.infinity_polling(skip_pending=True, timeout=60, long_polling_timeout=60)
